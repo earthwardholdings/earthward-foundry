@@ -1,0 +1,56 @@
+{
+  "fleet": "Earthward Foundry Agent Fleet",
+  "version": "0.1.0",
+  "shared_schema": "schema/part-record.schema.json",
+  "cross_cutting_rules": [
+    "No agent self-certifies its own output.",
+    "No agent hides a failure to look complete.",
+    "No agent invents a standard, spec, or certification.",
+    "Every escalation names who it goes to."
+  ],
+  "build_order": [
+    { "phase": 1, "agents": ["records/traceability"] },
+    { "phase": 2, "agents": ["metrology/cmm-programming", "metrology/quality-engineering"] },
+    { "phase": 3, "agents": ["engineering/manufacturing-engineer", "engineering/mechanical-design-engineer"] },
+    { "phase": 4, "agents": ["materials/metallurgist", "materials/foundry-process-engineer"] },
+    { "phase": 5, "agents": ["remaining houses: forge, assembly, validation, rest of stewardship"] }
+  ],
+  "houses": {
+    "leadership": {
+      "question": "Cross-house coordination",
+      "agents": ["foundry-general-manager", "principal-engineer"]
+    },
+    "engineering": {
+      "question": "Design what should exist",
+      "agents": ["manufacturing-engineer", "mechanical-design-engineer", "cad-digital-manufacturing-specialist"]
+    },
+    "materials": {
+      "question": "Understand what it is made from",
+      "agents": ["metallurgist", "materials-engineer", "foundry-process-engineer", "alloy-development-research"]
+    },
+    "forge": {
+      "question": "Transform material into physical form",
+      "agents": ["cnc-programming", "fabrication-sequencing", "furnace-ops", "tool-die-mold-design"]
+    },
+    "assembly": {
+      "question": "Turn components into systems",
+      "agents": ["assembly-sequencing", "integration-engineering", "commissioning"]
+    },
+    "metrology": {
+      "question": "Measure what was actually produced",
+      "agents": ["cmm-programming", "quality-engineering", "ndt-scheduling", "calibration-tracking"]
+    },
+    "validation": {
+      "question": "Prove that it performs",
+      "agents": ["test-validation-engineering", "reliability-failure-analysis", "test-instrumentation"]
+    },
+    "records": {
+      "question": "Preserve exactly what happened",
+      "agents": ["traceability", "configuration-management", "certificate-compliance-coordination"]
+    },
+    "stewardship": {
+      "question": "Maintain, improve, responsibly retire",
+      "agents": ["procurement", "ehs-safety", "program-project-management", "applications-technical-sales", "maintenance-reliability"]
+    }
+  }
+}

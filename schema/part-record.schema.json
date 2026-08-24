@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EarthwardPartRecord",
+  "description": "Append-only chain-of-custody record for one physical part instance. Every house agent writes events into this structure via the Traceability Agent. Never mutated in place; corrections are new events referencing the original.",
+  "type": "object",
+  "required": ["part_id", "part_number", "revision", "events"],
+  "properties": {
+    "part_id": {
+      "type": "string",
+      "description": "Unique identifier for this physical part instance (not the part number/design)."
+    },
+    "part_number": {
+      "type": "string",
+      "description": "Design/drawing part number."
+    },
+    "revision": {
+      "type": "string",
+      "description": "Drawing revision this instance was built to."
+    },
+    "current_status": {
+      "type": "string",
+      "description": "Derived from event history, never asserted directly — must be recomputable/auditable at any time.",
+      "enum": [
+        "material_received",
+        "in_process",
+        "inspection_pending",
+        "inspection_complete",
+        "ncr_open",
+        "acceptance_blocked",
+        "accepted",
+        "shipped",
+        "rejected"
+      ]
+    },
+    "events": {
+      "type": "array",
+      "description": "Append-only. Never mutated or deleted in place.",
+      "items": {
+        "type": "object",
+        "required": ["event_id", "timestamp", "event_type", "source", "reference"],
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "description": "Unique, sequential, never reused."
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "material_receipt",
+              "material_verification",
+              "process_step_start",
+              "process_step_complete",
+              "process_deviation",
+              "inspection_program_run",
+              "inspection_result",
+              "ncr_opened",
+              "ncr_closed",
+              "ncr_waived",
+              "acceptance_decision",
+              "correction",
+              "shipment"
+            ]
+          },
+          "source": {
+            "type": "object",
+            "required": ["type", "id"],
+            "properties": {
+              "type": { "type": "string", "enum": ["agent", "human"] },
+              "id": { "type": "string", "description": "Agent name or human employee ID." }
+            }
+          },
+          "reference": {
+            "type": "string",
+            "description": "Pointer to supporting data: cert number, inspection report ID, NCR ID, sign-off record ID, etc. Never free text standing alone."
+          },
+          "corrects_event_id": {
+            "type": ["string", "null"],
+            "description": "If this is a correction event, the event_id it corrects. Original event is never deleted."
+          },
+          "data": {
+            "type": "object",
+            "description": "Event-type-specific payload (measured values, deviation details, NCR summary, etc.)"
+          }
+        }
+      }
+    }
+  }
+}
