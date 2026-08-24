@@ -1,6 +1,29 @@
 {
   "fleet": "Earthward Foundry Agent Fleet",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "layers": {
+    "foundry": {
+      "description": "Core manufacturing and traceability fleet",
+      "service": "services/traceability"
+    },
+    "rescue": {
+      "description": "Rescue task force runner — routes rescue workers through incident pipeline using foundry fleet as foundation",
+      "service": "services/rescue",
+      "entry_point": "runner.py",
+      "demo": "services/rescue/demo.py",
+      "phase_map": {
+        "incident-log-agent":   "records/traceability",
+        "safety-agent":         "stewardship/ehs-safety",
+        "assessment-agent":     "metrology/quality-engineering",
+        "resource-agent":       "materials/materials-engineer",
+        "planning-agent":       "engineering/manufacturing-engineer",
+        "operations-agent":     "forge/fabrication-sequencing",
+        "integration-agent":    "assembly/integration-engineering",
+        "verification-agent":   "validation/test-validation-engineering",
+        "command-agent":        "leadership/foundry-general-manager"
+      }
+    }
+  },
   "shared_schema": "schema/part-record.schema.json",
   "cross_cutting_rules": [
     "No agent self-certifies its own output.",
