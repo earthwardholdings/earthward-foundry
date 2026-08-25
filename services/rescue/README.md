@@ -19,6 +19,245 @@ The same enforcement that prevents a CMM agent from marking a part
 "accepted" prevents an operations agent from closing an incident before
 objectives are verified. Same code, same pattern, different domain.
 
+## Quick start
+
+```bash
+cd services/rescue
+pip install flask
+
+# Run the demo (no server needed)
+python demo.py
+
+# Start the HTTP API
+python api.py
+# -> http://127.0.0.1:5001
+# -> http://127.0.0.1:5001/openapi.yaml
+```
+
+## Files
+
+```
+services/rescue/
+├── models.py         data structures, enums, errors
+├── incident_log.py   append-only SQLite incident store (zero external deps)
+├── runner.py         TaskForceRunner — 9-phase pipeline
+├── api.py            Flask HTTP API — model-agnostic, any client can call this
+├── openapi.yaml      machine-readable spec for tool/LLM discovery
+├── agent_tools.py    tool definitions + formatters for every major framework
+├── demo.py           narrated end-to-end walkthrough
+└── requirements.txt
+```
+
+---
+
+## HTTP API
+
+All enforcement lives in `incident_log.py`. The API only translates HTTP
+to function calls. Any language, any LLM, any tool can use it.
+
+```
+POST   /incidents                            open incident + run pipeline 1-5
+GET    /incidents                            list open incidents
+GET    /incidents/<id>                       full incident record
+POST   /incidents/<id>/actions               log an action
+POST   /incidents/<id>/hazards               open a hazard
+DELETE /incidents/<id>/hazards/<hid>         clear a hazard (human-only → 403 if agent)
+POST   /incidents/<id>/victims               add a victim
+POST   /incidents/<id>/escalations           raise an escalation
+PATCH  /escalations/<eid>/resolve            resolve an escalation
+POST   /incidents/<id>/plans                 draft an operational plan
+PATCH  /incidents/<id>/plans/<pid>/approve   approve plan (human-only → 403 if agent)
+POST   /incidents/<id>/resume                resume pipeline from named phase
+GET    /openapi.yaml                         OpenAPI 3.1 spec
+GET    /health                               liveness check
+```
+
+### Example — open an incident
+
+```bash
+curl -s -X POST http://127.0.0.1:5001/incidents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "incident_type": "urban_sar",
+    "priority": "life_threat",
+    "location": "412 Alderton Ave — apartment collapse",
+    "description": "Partial collapse, 2 confirmed trapped, gas leak",
+    "source": {"type": "human", "id": "Dispatcher-IC1"}
+  }' | python -m json.tool
+```
+
+### Example — log a field action
+
+```bash
+curl -s -X POST http://127.0.0.1:5001/incidents/<id>/actions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action_type": "extraction_started",
+    "source": {"type": "human", "id": "Team-Alpha-Lead"},
+    "reference": "radio-log-0412-1347",
+    "data": {"entry_point": "East stairwell"}
+  }'
+```
+
+### Example — agent tries to close incident (rejected)
+
+```bash
+curl -s -X POST http://127.0.0.1:5001/incidents/<id>/actions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action_type": "incident_closed",
+    "source": {"type": "agent", "id": "command-agent"},
+    "reference": "auto-close-attempt"
+  }'
+# -> 403 UnauthorizedSourceError
+```
+
+---
+
+## Wiring to any LLM framework
+
+`agent_tools.py` exports tool definitions and a single `dispatch()` function.
+Pick your framework:
+
+### OpenAI / OpenAI-compatible (Groq, Together, Mistral, etc.)
+
+```python
+from openai import OpenAI
+from agent_tools import as_openai_tools, dispatch
+import json
+
+client = OpenAI()
+tools = as_openai_tools()
+messages = [{"role": "user", "content": "Open a new urban SAR incident at 412 Alderton Ave."}]
+
+while True:
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        tools=tools,
+        messages=messages,
+    )
+    msg = response.choices[0].message
+    messages.append(msg)
+
+    if not msg.tool_calls:
+        print(msg.content)
+        break
+
+    for tc in msg.tool_calls:
+        result = dispatch(tc.function.name, json.loads(tc.function.arguments))
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "content": json.dumps(result),
+        })
+```
+
+### Anthropic Claude
+
+```python
+from anthropic import Anthropic
+from agent_tools import as_anthropic_tools, dispatch
+import json
+
+client = Anthropic()
+tools = as_anthropic_tools()
+messages = [{"role": "user", "content": "Open a new urban SAR incident at 412 Alderton Ave."}]
+
+while True:
+    response = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=4096,
+        tools=tools,
+        messages=messages,
+    )
+    messages.append({"role": "assistant", "content": response.content})
+
+    tool_uses = [b for b in response.content if b.type == "tool_use"]
+    if not tool_uses:
+        print(next(b.text for b in response.content if b.type == "text"))
+        break
+
+    tool_results = []
+    for block in tool_uses:
+        result = dispatch(block.name, block.input)
+        tool_results.append({
+            "type": "tool_result",
+            "tool_use_id": block.id,
+            "content": json.dumps(result),
+        })
+    messages.append({"role": "user", "content": tool_results})
+```
+
+### LangChain
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate
+from agent_tools import as_langchain_tools
+
+llm = ChatOpenAI(model="gpt-4o")
+tools = as_langchain_tools()
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a rescue coordination assistant. Use tools to manage incidents."),
+    ("human", "{input}"),
+    ("placeholder", "{agent_scratchpad}"),
+])
+
+agent = create_tool_calling_agent(llm, tools, prompt)
+executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+executor.invoke({"input": "Open a new urban SAR incident at 412 Alderton Ave."})
+```
+
+### CrewAI
+
+```python
+from crewai import Agent, Task, Crew
+from agent_tools import as_crewai_tools
+
+tools = as_crewai_tools()
+
+coordinator = Agent(
+    role="Rescue Coordinator",
+    goal="Manage and coordinate rescue incidents",
+    backstory="Expert in ICS and rescue operations",
+    tools=tools,
+    verbose=True,
+)
+
+task = Task(
+    description="Open a new urban SAR incident at 412 Alderton Ave and report the pipeline result.",
+    agent=coordinator,
+    expected_output="Incident ID and list of phases completed.",
+)
+
+Crew(agents=[coordinator], tasks=[task]).kickoff()
+```
+
+### HTTP (any language, no SDK)
+
+```python
+import requests, json
+
+BASE = "http://127.0.0.1:5001"
+
+# Open incident
+r = requests.post(f"{BASE}/incidents", json={
+    "incident_type": "urban_sar",
+    "priority": "life_threat",
+    "location": "412 Alderton Ave",
+    "description": "Partial collapse",
+    "source": {"type": "human", "id": "Dispatcher-1"},
+})
+incident_id = r.json()["incident_id"]
+
+# Get full record
+record = requests.get(f"{BASE}/incidents/{incident_id}").json()
+```
+
+---
+
 ## Foundry → Rescue mapping
 
 | Foundry house / agent       | Rescue equivalent         |
@@ -33,36 +272,6 @@ objectives are verified. Same code, same pattern, different domain.
 | EHS / Safety                | Safety Agent              |
 | Leadership / GM             | Command Agent             |
 
-## Files
-
-```
-services/rescue/
-├── models.py        data structures — Incident, IncidentAction, Hazard,
-│                    Victim, Escalation, OperationalPlan, enums, errors
-├── incident_log.py  append-only incident store (SQLite, zero external deps)
-│                    public API: open_incident, log_action, open_hazard,
-│                    clear_hazard, add_victim, raise_escalation,
-│                    draft_plan, approve_plan, get_incident
-├── runner.py        TaskForceRunner — 9-phase pipeline, human gates,
-│                    intake() and resume() entry points
-└── demo.py          narrated walkthrough — one urban SAR incident end-to-end
-```
-
-## Running the demo
-
-```bash
-cd services/rescue
-python demo.py
-```
-
-The demo walks one urban SAR incident (structural collapse, 2 trapped, gas
-leak) through all 9 phases and shows 2 intentional rejections:
-
-- Agent attempts to approve its own plan → `UnauthorizedSourceError`
-- Agent attempts to close incident before objectives verified → `InvalidSequenceError`
-
-No dependencies beyond the Python standard library.
-
 ## The pipeline
 
 ```
@@ -72,12 +281,15 @@ intake()
   Phase 3  Assessment Agent     — situational picture, surface gaps
   Phase 4  Resource Agent       — identify requirements, escalate to Logistics
   Phase 5  Planning Agent       — draft operational plan
-  *** HALT — awaiting Incident Commander plan approval ***
+  *** HALT — Incident Commander plan approval required ***
 
 resume(from_phase="operations-agent", authorized_by=<human IC>)
   Phase 6  Operations Agent     — deploy teams against approved plan
   Phase 7  Integration Agent    — check team-to-objective coverage
-  Phase 8  Verification Agent   — confirm objectives met (requires extraction_complete)
+  *** HALT — extraction_complete must be logged by field team ***
+
+resume(from_phase="verification-agent", authorized_by=<human IC>)
+  Phase 8  Verification Agent   — confirm objectives met
   Phase 9  Command Agent        — cross-team status roll-up
 
 Human logs: INCIDENT_CLOSED → AFTER_ACTION_FILED
@@ -85,42 +297,34 @@ Human logs: INCIDENT_CLOSED → AFTER_ACTION_FILED
 
 ## Human-only actions
 
-These cannot be logged by an agent source — the service rejects the
-attempt with `UnauthorizedSourceError`:
+Returns 403 if source.type is "agent":
 
-- `operational_plan_approved`
-- `victim_transferred`
-- `hazard_mitigated`
-- `hazard_cleared`
-- `incident_closed`
+| Action                       | Who must log it           |
+|------------------------------|---------------------------|
+| `operational_plan_approved`  | Incident Commander        |
+| `victim_transferred`         | Incident Commander        |
+| `hazard_mitigated`           | Safety Officer            |
+| `hazard_cleared`             | Safety Officer            |
+| `incident_closed`            | Incident Commander        |
 
-## Sequence rules (enforced in code)
+## Sequence rules (enforced in code, not prompts)
 
-| Action                    | Requires                        |
-|---------------------------|---------------------------------|
-| `operational_plan_approved` | `operational_plan_drafted`    |
-| `team_deployed`           | `operational_plan_approved`     |
-| `extraction_started`      | `victim_located`                |
-| `extraction_complete`     | `extraction_started`            |
-| `victim_stabilized`       | `victim_assessed`               |
-| `victim_transferred`      | `victim_stabilized`             |
-| `objective_verified`      | `team_deployed`                 |
-| `incident_closed`         | `objective_verified`            |
-| `after_action_filed`      | `incident_closed`               |
+| Action                     | Requires                        |
+|----------------------------|---------------------------------|
+| `operational_plan_approved`| `operational_plan_drafted`      |
+| `team_deployed`            | `operational_plan_approved`     |
+| `extraction_started`       | `victim_located`                |
+| `extraction_complete`      | `extraction_started`            |
+| `victim_stabilized`        | `victim_assessed`               |
+| `victim_transferred`       | `victim_stabilized`             |
+| `objective_verified`       | `team_deployed`                 |
+| `incident_closed`          | `objective_verified`            |
+| `after_action_filed`       | `incident_closed`               |
 
-Additionally, `team_deployed`, `extraction_started`, `victim_transferred`,
-and `incident_closed` are blocked while any critical or high hazard is open.
+`team_deployed`, `extraction_started`, `victim_transferred`, and
+`incident_closed` are also blocked while any critical or high hazard is open.
 
 ## Escalation rules
 
-`raise_escalation()` rejects vague targets. `escalate_to` must name a
-specific role or callsign — "a human" or "someone" is rejected outright.
-
-## What's not here yet
-
-- HTTP API wrapper (same pattern as `services/traceability/api.py`)
-- Claude tool-use wiring (same pattern as `services/traceability/agent_tools.py`)
-- Personnel and resource registry (stubs in `models.py`, not yet persisted)
-- UI / field interface — framework only at this stage
-
-These are the next build phases, in that order.
+`escalate_to` must name a specific role or callsign. Values like "a human"
+or "someone" are rejected with a 400 error. This is enforced in code.

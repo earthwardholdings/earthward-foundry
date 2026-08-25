@@ -1,0 +1,676 @@
+openapi: "3.1.0"
+info:
+  title: Earthward Rescue Task Force API
+  version: "1.0.0"
+  description: |
+    Model-agnostic HTTP API for the Earthward Rescue Task Force runner.
+    Works with any LLM framework (OpenAI, Anthropic, Mistral, LangChain,
+    LlamaIndex, AutoGen, CrewAI, custom), any HTTP client, or direct
+    human use. No SDK required.
+
+    ## The four rules (enforced in code, not just prompts)
+    1. No agent self-certifies its own output.
+    2. No agent hides a failure to look complete.
+    3. No agent invents a standard or authorization.
+    4. Every escalation names who it goes to.
+
+    ## Human-only actions
+    These endpoints return 403 if source.type is "agent":
+    - PATCH /incidents/{id}/plans/{pid}/approve
+    - DELETE /incidents/{id}/hazards/{hid}  (clear)
+    - POST /incidents/{id}/actions with action_type: incident_closed,
+      victim_transferred, hazard_mitigated, hazard_cleared,
+      operational_plan_approved
+
+servers:
+  - url: http://127.0.0.1:5001
+    description: Local development
+
+paths:
+
+  /health:
+    get:
+      operationId: health_check
+      summary: Liveness check
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string }
+
+  /incidents:
+    get:
+      operationId: list_incidents
+      summary: List all open incidents
+      responses:
+        "200":
+          description: Array of open incident summaries
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/IncidentSummary" }
+
+    post:
+      operationId: open_incident
+      summary: Open a new incident and run pipeline through plan draft
+      description: |
+        Opens the incident, activates the log, and automatically runs
+        phases 1–5 (safety sweep, assessment, resource requirements,
+        operational plan draft). Halts at the plan approval gate and
+        returns awaiting_human if approval is needed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OpenIncidentRequest" }
+      responses:
+        "201":
+          description: Incident opened, pipeline result returned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PipelineResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /incidents/{incident_id}:
+    get:
+      operationId: get_incident
+      summary: Get full incident record including all actions, hazards, victims, escalations
+      parameters:
+        - { $ref: "#/components/parameters/incident_id" }
+      responses:
+        "200":
+          description: Full incident record
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IncidentRecord" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /incidents/{incident_id}/actions:
+    post:
+      operationId: log_action
+      summary: Append an action to an incident's log
+      description: |
+        Append-only. Sequence rules and human-only gates are enforced
+        server-side. Returns 403 if a human-only action_type is submitted
+        with source.type="agent". Returns 409 on sequence violations or
+        hazard blocks.
+      parameters:
+        - { $ref: "#/components/parameters/incident_id" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LogActionRequest" }
+      responses:
+        "201":
+          description: Action logged
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /incidents/{incident_id}/hazards:
+    post:
+      operationId: open_hazard
+      summary: Log a new hazard against an incident
+      parameters:
+        - { $ref: "#/components/parameters/incident_id" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OpenHazardRequest" }
+      responses:
+        "201":
+          description: Hazard logged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hazard_id: { type: string }
+                  incident_id: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /incidents/{incident_id}/hazards/{hazard_id}:
+    delete:
+      operationId: clear_hazard
+      summary: Clear a hazard — human-only
+      description: Returns 403 if source.type is not "human".
+      parameters:
+        - { $ref: "#/components/parameters/incident_id" }
+        - name: hazard_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClearHazardRequest" }
+      responses:
+        "200":
+          description: Hazard cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cleared: { type: boolean }
+                  hazard_id: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /incidents/{incident_id}/victims:
+    post:
+      operationId: add_victim
+      summary: Register a victim against an incident
+      parameters:
+        - { $ref: "#/components/parameters/incident_id" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddVictimRequest" }
+      responses:
+        "201":
+          description: Victim registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  victim_id: { type: string }
+                  incident_id: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /incidents/{incident_id}/escalations:
+    post:
+      operationId: raise_escalation
+      summary: Raise an escalation — escalate_to must name a specific role
+      parameters:
+        - { $ref: "#/components/parameters/incident_id" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RaiseEscalationRequest" }
+      responses:
+        "201":
+          description: Escalation raised
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  escalation_id: { type: string }
+                  incident_id: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /escalations/{escalation_id}/resolve:
+    patch:
+      operationId: resolve_escalation
+      summary: Mark an escalation resolved
+      parameters:
+        - name: escalation_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resolved_by]
+              properties:
+                resolved_by:
+                  type: string
+                  description: Named human who resolved this escalation
+      responses:
+        "200":
+          description: Escalation resolved
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /incidents/{incident_id}/plans:
+    post:
+      operationId: draft_plan
+      summary: Draft an operational plan — always status=draft
+      parameters:
+        - { $ref: "#/components/parameters/incident_id" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DraftPlanRequest" }
+      responses:
+        "201":
+          description: Plan drafted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plan_id: { type: string }
+                  status: { type: string, example: draft }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /incidents/{incident_id}/plans/{plan_id}/approve:
+    patch:
+      operationId: approve_plan
+      summary: Approve an operational plan — human-only
+      description: Returns 403 if source.type is not "human".
+      parameters:
+        - { $ref: "#/components/parameters/incident_id" }
+        - name: plan_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source]
+              properties:
+                source: { $ref: "#/components/schemas/Source" }
+      responses:
+        "200":
+          description: Plan approved
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /incidents/{incident_id}/resume:
+    post:
+      operationId: resume_pipeline
+      summary: Resume pipeline from a named phase after a human gate is cleared
+      description: |
+        authorized_by must be a human source. Used after plan approval,
+        hazard clearance, or extraction confirmation.
+      parameters:
+        - { $ref: "#/components/parameters/incident_id" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_phase, source]
+              properties:
+                from_phase:
+                  type: string
+                  description: Phase name to resume from
+                  enum:
+                    - incident-log-agent
+                    - safety-agent
+                    - assessment-agent
+                    - resource-agent
+                    - planning-agent
+                    - operations-agent
+                    - integration-agent
+                    - verification-agent
+                    - command-agent
+                source: { $ref: "#/components/schemas/Source" }
+      responses:
+        "200":
+          description: Pipeline resumed, result returned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PipelineResult" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+
+components:
+
+  parameters:
+    incident_id:
+      name: incident_id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Bad request — missing or invalid field
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Human-only action attempted by an agent source
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Incident, hazard, or escalation not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Sequence violation or hazard block
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+
+    Error:
+      type: object
+      properties:
+        error: { type: string, description: Exception class name }
+        message: { type: string, description: Human-readable detail }
+
+    Source:
+      type: object
+      required: [type, id]
+      properties:
+        type:
+          type: string
+          enum: [human, agent]
+          description: >
+            "human" for a named person (callsign, badge number, role+name).
+            "agent" for an AI agent or automated system.
+        id:
+          type: string
+          description: >
+            Named human identifier or agent name.
+            Never anonymous — every source must be identifiable.
+
+    ActionType:
+      type: string
+      enum:
+        - situation_report
+        - hazard_identified
+        - victim_located
+        - victim_assessed
+        - operational_plan_drafted
+        - operational_plan_approved
+        - resource_assigned
+        - resource_released
+        - resource_requested
+        - team_deployed
+        - extraction_started
+        - extraction_complete
+        - victim_stabilized
+        - victim_transferred
+        - objective_verified
+        - hazard_opened
+        - hazard_mitigated
+        - hazard_cleared
+        - incident_opened
+        - incident_closed
+        - after_action_filed
+        - correction
+
+    IncidentType:
+      type: string
+      enum:
+        - urban_sar
+        - wilderness_sar
+        - disaster
+        - maritime
+        - hazmat
+        - medical_mass_cas
+
+    IncidentPriority:
+      type: string
+      enum:
+        - life_threat
+        - urgent
+        - standard
+        - monitor
+
+    TriageCategory:
+      type: string
+      enum: [immediate, delayed, minimal, expectant]
+
+    HazardSeverity:
+      type: string
+      enum: [critical, high, moderate, low]
+
+    OpenIncidentRequest:
+      type: object
+      required: [incident_type, priority, location, description, source]
+      properties:
+        incident_type: { $ref: "#/components/schemas/IncidentType" }
+        priority: { $ref: "#/components/schemas/IncidentPriority" }
+        location:
+          type: string
+          description: Address or location description
+        description:
+          type: string
+          description: Initial incident description
+        source: { $ref: "#/components/schemas/Source" }
+        incident_id:
+          type: string
+          description: Optional — supply a known ID (e.g. CAD incident number)
+
+    LogActionRequest:
+      type: object
+      required: [action_type, source, reference]
+      properties:
+        action_type: { $ref: "#/components/schemas/ActionType" }
+        source: { $ref: "#/components/schemas/Source" }
+        reference:
+          type: string
+          description: >
+            Pointer to supporting data — radio log ID, report number,
+            order reference. Free text alone is rejected.
+        data:
+          type: object
+          description: Action-type-specific payload
+        corrects_action_id:
+          type: string
+          description: Set only for correction actions
+
+    OpenHazardRequest:
+      type: object
+      required: [description, severity, source]
+      properties:
+        description: { type: string }
+        severity: { $ref: "#/components/schemas/HazardSeverity" }
+        source: { $ref: "#/components/schemas/Source" }
+        notes: { type: string }
+
+    ClearHazardRequest:
+      type: object
+      required: [source]
+      properties:
+        source:
+          allOf:
+            - { $ref: "#/components/schemas/Source" }
+            - properties:
+                type: { type: string, enum: [human] }
+        notes: { type: string }
+
+    AddVictimRequest:
+      type: object
+      required: [description, location_description, triage_category, source]
+      properties:
+        description: { type: string }
+        location_description: { type: string }
+        triage_category: { $ref: "#/components/schemas/TriageCategory" }
+        source: { $ref: "#/components/schemas/Source" }
+
+    RaiseEscalationRequest:
+      type: object
+      required: [raised_by, escalate_to, reason, action_required]
+      properties:
+        raised_by:
+          type: string
+          description: Agent name or human identifier raising this escalation
+        escalate_to:
+          type: string
+          description: >
+            MUST name a specific role or person — "Incident Commander",
+            "Safety Officer", "Logistics Section Chief", etc.
+            Vague values like "a human" are rejected with 400.
+        reason: { type: string }
+        action_required: { type: string }
+
+    DraftPlanRequest:
+      type: object
+      required: [drafted_by, objectives]
+      properties:
+        drafted_by: { type: string }
+        objectives:
+          type: array
+          items: { type: string }
+        team_assignments:
+          type: object
+          additionalProperties: { type: string }
+        resource_assignments:
+          type: object
+          additionalProperties: { type: string }
+        assumptions:
+          type: array
+          items: { type: string }
+          description: Always explicit — never folded in silently
+        open_questions:
+          type: array
+          items: { type: string }
+
+    ActionResult:
+      type: object
+      properties:
+        action_id: { type: string }
+        incident_id: { type: string }
+        action_type: { type: string }
+
+    IncidentSummary:
+      type: object
+      properties:
+        incident_id: { type: string }
+        incident_type: { $ref: "#/components/schemas/IncidentType" }
+        priority: { $ref: "#/components/schemas/IncidentPriority" }
+        location: { type: string }
+        current_status: { type: string }
+        reported_at: { type: string, format: date-time }
+
+    IncidentRecord:
+      type: object
+      properties:
+        incident_id: { type: string }
+        incident_type: { $ref: "#/components/schemas/IncidentType" }
+        priority: { $ref: "#/components/schemas/IncidentPriority" }
+        location: { type: string }
+        description: { type: string }
+        reported_at: { type: string, format: date-time }
+        current_status:
+          type: string
+          description: >
+            Derived from action history — never stored directly.
+            Values: reported, assessing, planning, operations,
+            hazard_blocked, extracting, transferring, closed
+        open_escalations: { type: integer }
+        open_hazards: { type: integer }
+        actions:
+          type: array
+          items: { $ref: "#/components/schemas/Action" }
+        hazards:
+          type: array
+          items: { $ref: "#/components/schemas/HazardRecord" }
+        escalations:
+          type: array
+          items: { $ref: "#/components/schemas/EscalationRecord" }
+        victims:
+          type: array
+          items: { $ref: "#/components/schemas/VictimRecord" }
+        operational_plans:
+          type: array
+          items: { $ref: "#/components/schemas/PlanRecord" }
+
+    Action:
+      type: object
+      properties:
+        action_id: { type: string }
+        timestamp: { type: string, format: date-time }
+        action_type: { $ref: "#/components/schemas/ActionType" }
+        source: { $ref: "#/components/schemas/Source" }
+        reference: { type: string }
+        data: { type: object }
+        corrects_action_id: { type: string, nullable: true }
+
+    HazardRecord:
+      type: object
+      properties:
+        hazard_id: { type: string }
+        description: { type: string }
+        severity: { $ref: "#/components/schemas/HazardSeverity" }
+        opened_at: { type: string, format: date-time }
+        cleared_at: { type: string, format: date-time, nullable: true }
+        is_open: { type: boolean }
+
+    EscalationRecord:
+      type: object
+      properties:
+        escalation_id: { type: string }
+        timestamp: { type: string, format: date-time }
+        raised_by: { type: string }
+        escalate_to: { type: string }
+        reason: { type: string }
+        action_required: { type: string }
+        resolved: { type: boolean }
+
+    VictimRecord:
+      type: object
+      properties:
+        victim_id: { type: string }
+        description: { type: string }
+        location_description: { type: string }
+        triage_category: { $ref: "#/components/schemas/TriageCategory" }
+        located_at: { type: string, nullable: true }
+        extracted_at: { type: string, nullable: true }
+        transferred_at: { type: string, nullable: true }
+
+    PlanRecord:
+      type: object
+      properties:
+        plan_id: { type: string }
+        drafted_by: { type: string }
+        status: { type: string, enum: [draft, approved] }
+        objectives: { type: array, items: { type: string } }
+        assumptions: { type: array, items: { type: string } }
+        open_questions: { type: array, items: { type: string } }
+        approved_by: { type: string, nullable: true }
+        approved_at: { type: string, nullable: true }
+
+    PipelineResult:
+      type: object
+      properties:
+        incident_id: { type: string }
+        phases_completed:
+          type: array
+          items: { type: string }
+        current_phase: { type: string, nullable: true }
+        awaiting_human:
+          type: object
+          nullable: true
+          properties:
+            phase: { type: string }
+            message: { type: string }
+        escalations:
+          type: array
+          items: { type: object }
+        blocks:
+          type: array
+          items:
+            type: object
+            properties:
+              phase: { type: string }
+              reason: { type: string }
+        outputs: { type: object }
